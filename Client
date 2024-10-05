@@ -1,0 +1,135 @@
+import socket
+import hashlib
+import os
+import threading
+from protocol import receive_protocol
+
+
+# Function to get the MD5 hash of a number
+def get_md5_hash(number):
+    """
+    Returns the MD5 hash of a given number.
+
+    Args:
+        number (int): The number to hash.
+
+    Returns:
+        str: MD5 hash of the number.
+    """
+    return hashlib.md5(str(number).encode()).hexdigest()
+
+
+# Function that checks numbers in the range
+def check_number_range(start, end, md5_number, result, lock):
+    """
+    Checks each number in the given range to see if its MD5 hash matches the target MD5.
+
+    Args:
+        start (int): Start of the range.
+        end (int): End of the range.
+        md5_number (str): Target MD5 hash to match.
+        result (list): Shared result list across threads where [0] is "YES"/"NO", and [1] is the matching number.
+        lock (threading.Lock): A lock for synchronizing result updates across threads.
+    """
+    for number in range(start, end):
+        md5_hash = get_md5_hash(number)
+        if md5_hash == md5_number:
+            print(f"Number found: {number}")
+            with lock:
+                result[0] = "YES"
+                result[1] = number
+            return  # Exit early if the number is found
+
+
+# Function to divide work among threads
+def threaded_check(start, end, md5_number, num_threads):
+    """
+    Splits the range into subranges and assigns each subrange to a separate thread for checking.
+
+    Args:
+        start (int): Start of the range.
+        end (int): End of the range.
+        md5_number (str): Target MD5 hash to match.
+        num_threads (int): Number of threads to use.
+
+    Returns:
+        tuple: ("YES" or "NO", matching number or None).
+    """
+    assert start < end, "Start of range must be less than end"
+    assert num_threads > 0, "Number of threads must be positive"
+
+    step = (end - start) // num_threads
+    threads = []
+    result = ["NO", None]  # Shared list to store result across threads
+    lock = threading.Lock()  # Lock to synchronize access to the shared result
+
+    for i in range(num_threads):
+        thread_start = start + i * step
+        thread_end = start + (i + 1) * step if i != num_threads - 1 else end
+        thread = threading.Thread(target=check_number_range, args=(thread_start, thread_end, md5_number, result, lock))
+        thread.start()
+        threads.append(thread)
+
+    # Wait for all threads to finish
+    for thread in threads:
+        thread.join()
+
+    return result[0], result[1]
+
+
+# Function to receive start, end, and MD5 hash from the server
+def receive_full_response(my_socket):
+    """
+    Receives start, end, and the MD5 hash from the server.
+
+    Args:
+        my_socket (socket.socket): The connected socket to receive data from.
+
+    Returns:
+        tuple: (start, end, md5_number) where start and end are integers and md5_number is a string.
+    """
+    start, end, md5_number = receive_protocol(my_socket)
+    return int(start), int(end), md5_number
+
+
+def main():
+    """
+    Main function for the client. It connects to the server, sends the CPU count,
+    receives a range to check, and uses multiple threads to compute MD5 hashes
+    for the range of numbers.
+    """
+    my_socket = socket.socket()
+    my_socket.connect(("127.0.0.1", 8820))
+    print('Connected')
+
+    # Get the number of available CPUs
+    cpu_count = os.cpu_count()
+    assert cpu_count > 0, "CPU count must be a positive integer."
+
+    # Send the CPU count to the server
+    message = f'00{cpu_count}!'
+    my_socket.send(message.encode())
+
+    # Receive the range and MD5 hash from the server
+    start, end, md5_number = receive_full_response(my_socket)
+    print(f"Received range: {start} to {end}, Target MD5: {md5_number}")
+
+    # Perform the threaded check for the range
+    answer, number = threaded_check(start, end, md5_number, cpu_count)
+
+    # Send the result back to the server
+    if number is not None:
+        final_answer = f'02{answer}!{number}!'
+    else:
+        final_answer = '00NO!'
+
+    my_socket.send(final_answer.encode())
+    print(f"Sent result: {final_answer}")
+
+    # After sending the result, close the connection
+    my_socket.close()
+    print("Socket closed after processing the assigned range.")
+
+
+if __name__ == '__main__':
+    main()
