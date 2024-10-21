@@ -1,106 +1,82 @@
 import socket
-from threading import Thread, Lock
-from protocol import receive_protocol
-
-QUEUE_SIZE = 1
-CURRENT_NUMBER = 1
-BASE_STEP_SIZE = 20
-MD5_NUMBER = "ac627ab1ccbdb62ec96e702f07f6425b"  # number to check is 99
-lock = Lock()  # Lock for synchronizing access to CURRENT_NUMBER
 
 
-def handle_client(client_socket):
+def receive_protocol(my_socket):
     """
-    Handles the communication with a single client.
-    The server sends a number range based on the client's CPU count and the MD5 hash
-    that the client should attempt to find the number for. After the client finishes
-    processing, it sends back the result to the server.
+    Handles receiving data from a socket based on a custom protocol. The function
+    decodes an operation code (op) and retrieves associated data based on the op value.
 
     Args:
-        client_socket (socket.socket): The socket object for client communication.
+        my_socket (socket.socket): The socket object to receive data from.
+
+    Returns:
+        tuple: Returns a tuple of data corresponding to the operation code:
+            - ('00') -> (client_answer, op)
+            - ('01') -> (start, end, md5)
+            - ('02') -> (start, end) THIS IS FOR WHEN THE CLIENT SENDS ITS RESULTS AFTER THE SEARCH IN HIS RANGE
+            - None if the operation code does not match any expected values.
 
     Raises:
-        ValueError: If the CPU count received from the client is not a valid integer.
-        AssertionError: If the CPU count is less than 1.
+        AssertionError: If the operation code is not valid or expected values aren't
+        received correctly.
     """
-    global CURRENT_NUMBER
-    try:
-        # Receive the CPU count from the client
-        answer, op = receive_protocol(client_socket)
-        if op == '00':
-            cpu_count = int(answer)
 
-            # Assert that cpu_count is positive and non-zero
-            assert cpu_count > 0, "CPU count must be a positive integer."
+    # Receive the operation code
+    op = my_socket.recv(2).decode()
+    assert op in ['00', '01', '02'], f"Invalid operation code received: {op}"
 
-            print(f"Client has {cpu_count} CPUs")
-            step_size = BASE_STEP_SIZE * cpu_count  # More cores = larger range
-
-            with lock:  # Ensure exclusive access to CURRENT_NUMBER
-                range_start = CURRENT_NUMBER
-                range_end = CURRENT_NUMBER + step_size
-                CURRENT_NUMBER += step_size
-
-            # Assert that range_start is less than range_end
-            assert range_start < range_end, "Range start must be less than range end."
-
-            # Send the range and MD5 number to the client
-            message = f"01{range_start}!{range_end}!{MD5_NUMBER}!"
-            client_socket.send(message.encode())
-
-            # Receive the client's response
-            client_answer, number = receive_protocol(client_socket)
-
-            # Validate the received number is a valid integer
-            assert number.isdigit(), "Received number from client is not a valid integer."
-
-            print(client_answer)
-            print(number)
-            if client_answer == "YES":
-                print(f"Found! Number is {number}")
-            elif client_answer == "NO":
-                print(f"Not Found in range {range_start} - {range_end}")
-            else:
-                print("Unexpected response from client.")
-
-    except ValueError as ve:
-        print(f"Value error handling client: {ve}")
-    except AssertionError as ae:
-        print(f"Assertion error: {ae}")
-    except Exception as e:
-        print(f"Error handling client: {e}")
-    finally:
-        # Close the connection with the client after receiving their result
-        client_socket.close()
-        print(f"Client dismissed after processing range {range_start} - {range_end}")
-
-
-def main():
-    """
-    Main function to start the server. It binds the server to the specified address
-    and port, then listens for incoming client connections. For each connected client,
-    a new thread is started to handle the client's request.
-
-    Raises:
-        socket.error: If there's an issue with socket creation or binding.
-    """
-    server_socket = socket.socket()
-    try:
-        server_socket.bind(('0.0.0.0', 8820))
-        server_socket.listen(QUEUE_SIZE)
-        print("Server is up and running")
-
+    if op == '00':  # For '00' operation, expect a single data block until '!' is encountered
+        # Receiving data until '!' is encountered
+        data = b''
         while True:
-            client_socket, client_address = server_socket.accept()
-            print(f"Client connected: {client_address}")
-            thread = Thread(target=handle_client, args=(client_socket,))
-            thread.start()
+            temp = my_socket.recv(1)
+            assert temp, "Unexpected empty data received."
+            if temp == b'!':
+                break
+            data += temp
 
-    except socket.error as err:
-        print(f"Socket error: {err}")
-    finally:
-        server_socket.close()
+        # Decode the complete data
+        client_answer = data.decode()
 
+        # Assert that data has been correctly received
+        assert client_answer, "No client answer received for operation '00'."
 
-if __name__ == '__main__':
-    main()
+        return client_answer, op
+
+    elif op == '01' or op == '02':  # For '01' and '02', expect ranges and (optionally) MD5 hash
+        # Receiving 'start' data until '!' is encountered
+        start = b''
+        while True:
+            temp = my_socket.recv(1)
+            assert temp, "Unexpected empty data received for 'start'."
+            if temp == b'!':
+                break
+            start += temp
+
+        # Receiving 'end' data until '!' is encountered
+        end = b''
+        while True:
+            temp = my_socket.recv(1)
+            assert temp, "Unexpected empty data received for 'end'."
+            if temp == b'!':
+                break
+            end += temp
+
+        # For operation '01', also receive the MD5 hash
+        if op == '01':
+            md5 = b''
+            while True:
+                temp = my_socket.recv(1)
+                assert temp, "Unexpected empty data received for 'md5'."
+                if temp == b'!':
+                    break
+                md5 += temp
+
+            # Return start, end, and md5 as strings
+            return start.decode(), end.decode(), md5.decode()
+
+        # For operation '02', only return start and end
+        return start.decode(), end.decode()
+
+    # Return None if the operation code is invalid or not handled
+    return None
